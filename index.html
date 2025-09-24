@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <title>Leitor PWA — QR & Código de Barras</title>
+  <style>
+    :root { --bg:#ffffff; --fg:#0f172a; --muted:#475569; --brand:#0ea5e9; }
+    html,body{height:100%}
+    body{margin:0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;background:var(--bg);color:var(--fg);}
+    header{position:sticky;top:0;background:#e6f6fe;padding:12px 16px;border-bottom:1px solid #bae6fd;z-index:10}
+    header h1{margin:0;font-weight:700;font-size:18px}
+    .container{max-width:900px;margin:0 auto;padding:16px}
+    .card{border:1px solid #e2e8f0;border-radius:16px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .row > * {flex:1}
+    video{width:100%;border-radius:12px;background:#000;min-height:240px}
+    select, input, button{border:1px solid #cbd5e1;border-radius:12px;padding:10px 12px;font-size:14px}
+    button{cursor:pointer;background:var(--brand);color:#fff;border:none;font-weight:600}
+    button.secondary{background:#0f172a}
+    button.ghost{background:#fff;color:var(--fg);border:1px solid #cbd5e1}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
+    th, td{border-bottom:1px solid #e2e8f0;padding:8px;text-align:left;vertical-align:top}
+    th{background:#f8fafc;position:sticky;top:0}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:12px}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid #cbd5e1;background:#fff}
+    .muted{color:var(--muted)}
+    footer{color:#64748b;font-size:12px;margin-top:16px;text-align:center}
+    .hint{font-size:12px;color:#64748b}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Leitor QR & Barras (PWA)</h1>
+  </header>
+  <div class="container">
+    <div class="card">
+      <div class="row">
+        <div style="flex:2">
+          <video id="preview" playsinline muted></video>
+          <div class="toolbar">
+            <button id="btnStart">Iniciar câmera</button>
+            <button id="btnStop" class="ghost" disabled>Parar</button>
+            <button id="btnScanOnce" class="secondary" disabled>Escanear 1x</button>
+            <button id="btnToggle" disabled>Contínuo: OFF</button>
+            <button id="btnTorch" class="ghost" disabled>Lanterna</button>
+          </div>
+          <div class="hint">Dica: em iPhone, adicione à tela inicial para experiência PWA completa.</div>
+        </div>
+        <div style="flex:1;min-width:260px">
+          <label class="muted">Câmera</label>
+          <select id="deviceSelect"></select>
+          <label class="muted">Formato alvo (opcional)</label>
+          <select id="formatSelect">
+            <option value="">Qualquer (auto)</option>
+            <option>QR_CODE</option>
+            <option>EAN_13</option>
+            <option>EAN_8</option>
+            <option>CODE_128</option>
+            <option>CODE_39</option>
+            <option>ITF</option>
+            <option>PDF_417</option>
+            <option>AZTEC</option>
+            <option>DATA_MATRIX</option>
+            <option>UPC_A</option>
+            <option>UPC_E</option>
+          </select>
+          <div style="margin-top:8px" class="pill">
+            <span id="statusDot" style="width:8px;height:8px;background:#94a3b8;border-radius:50%"></span>
+            <span id="statusText">Aguardando…</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="toolbar">
+        <button id="btnExportCSV" class="ghost">Exportar CSV</button>
+        <button id="btnExportXLSX" class="ghost">Exportar Excel (.xlsx)</button>
+        <button id="btnClear" class="ghost">Limpar</button>
+      </div>
+      <table id="resultTable">
+        <thead>
+          <tr>
+            <th>Data/Hora</th>
+            <th>Tipo</th>
+            <th>Conteúdo</th>
+            <th>Dispositivo</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="hint">Os dados ficam somente no seu dispositivo (localStorage). Perfeito para uso offline.</div>
+    </div>
+
+    <footer>Instalável como PWA • Funciona no navegador móvel • Compatível com QR e vários padrões de barras via ZXing</footer>
+  </div>
+
+  <!-- ZXing (leitura QR/códigos) -->
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <!-- SheetJS para exportar Excel -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <script>
+  const video = document.getElementById('preview');
+  const deviceSelect = document.getElementById('deviceSelect');
+  const formatSelect = document.getElementById('formatSelect');
+  const btnStart = document.getElementById('btnStart');
+  const btnStop = document.getElementById('btnStop');
+  const btnScanOnce = document.getElementById('btnScanOnce');
+  const btnToggle = document.getElementById('btnToggle');
+  const btnTorch = document.getElementById('btnTorch');
+  const btnExportCSV = document.getElementById('btnExportCSV');
+  const btnExportXLSX = document.getElementById('btnExportXLSX');
+  const btnClear = document.getElementById('btnClear');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const tbody = document.querySelector('#resultTable tbody');
+
+  const codeReader = new ZXing.BrowserMultiFormatReader();
+  let currentDeviceId = null;
+  let stream = null;
+  let scanning = false;
+  let continuous = false;
+  let torchOn = false;
+  let imageCapture = null;
+  let deviceLabel = '';
+
+  // PWA
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js');
+    });
+  }
+
+  function setStatus(txt, color){
+    statusText.textContent = txt;
+    statusDot.style.background = color || '#22c55e';
+  }
+
+  function loadSaved(){
+    const saved = JSON.parse(localStorage.getItem('scans') || '[]');
+    saved.forEach(addRow);
+  }
+
+  function saveAll(){
+    const rows = Array.from(tbody.querySelectorAll('tr')).map(tr => ({
+      ts: tr.children[0].textContent,
+      format: tr.children[1].textContent,
+      text: tr.children[2].textContent,
+      device: tr.children[3].textContent,
+    }));
+    localStorage.setItem('scans', JSON.stringify(rows));
+  }
+
+  
+  function addRow(obj){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${obj.ts}</td><td><span class="badge">${obj.format}</span></td><td>${obj.text}</td><td>${obj.device||''}</td>`;
+    tbody.prepend(tr);
+    // Prompt user for asset details
+    const tomb = prompt("Tombamento:", "");
+    const desc = prompt("Descrição:", "");
+    const loc = prompt("Local:", "");
+    const carga = prompt("Carga:", "");
+    obj.tombamento = tomb||'';
+    obj.descricao = desc||'';
+    obj.local = loc||'';
+    obj.carga = carga||'';
+    tr.dataset.extra = JSON.stringify({tombamento: obj.tombamento, descricao: obj.descricao, local: obj.local, carga: obj.carga});
+    saveAll();
+  }
+
+  function saveAll(){
+    const rows = Array.from(tbody.querySelectorAll('tr')).map(tr => {
+      const base = {
+        ts: tr.children[0].textContent,
+        format: tr.children[1].textContent,
+        text: tr.children[2].textContent,
+        device: tr.children[3].textContent
+      };
+      try{
+        const extra = JSON.parse(tr.dataset.extra||'{}');
+        return {...base, ...extra};
+      }catch(e){ return base; }
+    });
+    localStorage.setItem('scans', JSON.stringify(rows));
+  }
+
+  btnExportCSV.addEventListener('click', () => {
+    const rows = [['Tombamento','Descrição','Local','Carga']];
+    tbody.querySelectorAll('tr').forEach(tr => {
+      try{
+        const extra = JSON.parse(tr.dataset.extra||'{}');
+        rows.push([extra.tombamento||'', extra.descricao||'', extra.local||'', extra.carga||'']);
+      }catch(e){ rows.push(['','','','']); }
+    });
+    const csv = rows.map(r => r.map(x => `"${(x||'').replace(/"/g,'""')}"`).join(',')).join('
+');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'patrimonio.csv';
+    a.click();
+  });
+
+  btnExportXLSX.addEventListener('click', () => {
+    const data = [];
+    tbody.querySelectorAll('tr').forEach(tr => {
+      try{
+        const extra = JSON.parse(tr.dataset.extra||'{}');
+        data.push({
+          'Tombamento': extra.tombamento||'',
+          'Descrição': extra.descricao||'',
+          'Local': extra.local||'',
+          'Carga': extra.carga||''
+        });
+      }catch(e){ data.push({'Tombamento':'','Descrição':'','Local':'','Carga':''}); }
+    });
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, 'Patrimonio');
+    XLSX.writeFile(wb, 'patrimonio.xlsx');
+  });
+
+  btnClear.addEventListener('click', () => {
+    tbody.innerHTML = '';
+    saveAll();
+  });
+
+  loadSaved();
+  </script>
+</body>
+</html>
