@@ -160,74 +160,198 @@
     localStorage.setItem('scans', JSON.stringify(rows));
   }
 
-  
   function addRow(obj){
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${obj.ts}</td><td><span class="badge">${obj.format}</span></td><td>${obj.text}</td><td>${obj.device||''}</td>`;
     tbody.prepend(tr);
-    // Prompt user for asset details
-    const tomb = prompt("Tombamento:", "");
-    const desc = prompt("Descrição:", "");
-    const loc = prompt("Local:", "");
-    const carga = prompt("Carga:", "");
-    obj.tombamento = tomb||'';
-    obj.descricao = desc||'';
-    obj.local = loc||'';
-    obj.carga = carga||'';
-    tr.dataset.extra = JSON.stringify({tombamento: obj.tombamento, descricao: obj.descricao, local: obj.local, carga: obj.carga});
     saveAll();
   }
 
-  function saveAll(){
-    const rows = Array.from(tbody.querySelectorAll('tr')).map(tr => {
-      const base = {
-        ts: tr.children[0].textContent,
-        format: tr.children[1].textContent,
-        text: tr.children[2].textContent,
-        device: tr.children[3].textContent
-      };
-      try{
-        const extra = JSON.parse(tr.dataset.extra||'{}');
-        return {...base, ...extra};
-      }catch(e){ return base; }
+  async function listCameras(){
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter(d => d.kind === 'videoinput');
+    deviceSelect.innerHTML = '';
+    videoInputs.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Câmera ${i+1}`;
+      deviceSelect.appendChild(opt);
     });
-    localStorage.setItem('scans', JSON.stringify(rows));
+    if (videoInputs.length){
+      // prioriza traseira se existir (label contém 'back')
+      const back = videoInputs.find(d => /back|traseira|rear/i.test(d.label));
+      deviceSelect.value = (back && back.deviceId) || videoInputs[0].deviceId;
+      currentDeviceId = deviceSelect.value;
+      deviceLabel = videoInputs.find(v=>v.deviceId===currentDeviceId)?.label || '';
+    }
   }
 
+  async function start(){
+    try{
+      await listCameras();
+      currentDeviceId = deviceSelect.value;
+      const constraints = {
+        audio: false,
+        video: {
+          deviceId: currentDeviceId ? { exact: currentDeviceId } : undefined,
+          facingMode: 'environment',
+        }
+      };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      await video.play();
+      btnStop.disabled = false;
+      btnScanOnce.disabled = false;
+      btnToggle.disabled = false;
+      setStatus('Câmera ativa', '#22c55e');
+
+      // Torch (quando suportado)
+      const track = stream.getVideoTracks()[0];
+      try {
+        imageCapture = new ImageCapture(track);
+        const cap = await track.getCapabilities?.();
+        if (cap && cap.torch !== undefined){
+          btnTorch.disabled = false;
+        } else {
+          btnTorch.disabled = true;
+        }
+      } catch(e){
+        btnTorch.disabled = true;
+      }
+    } catch(err){
+      console.error(err);
+      setStatus('Permissão negada ou erro na câmera', '#ef4444');
+      alert('Erro ao acessar a câmera. Verifique permissões/HTTPS.');
+    }
+  }
+
+  async function stop(){
+    continuous = false;
+    btnToggle.textContent = 'Contínuo: OFF';
+    if (stream){
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    codeReader.reset();
+    btnStop.disabled = true;
+    btnScanOnce.disabled = true;
+    btnToggle.disabled = true;
+    btnTorch.disabled = true;
+    setStatus('Parado', '#94a3b8');
+  }
+
+  async function scanOnce(){
+    if (!stream){ return alert('Inicie a câmera primeiro.'); }
+    try{
+      const hints = new Map();
+      const desired = formatSelect.value;
+      if (desired){
+        const formats = ZXing.BarcodeFormat;
+        const keys = Object.keys(formats);
+        const matchKey = keys.find(k => k === desired);
+        if (matchKey){
+          hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [formats[matchKey]]);
+        }
+      }
+      const result = await codeReader.decodeOnceFromVideoDevice(currentDeviceId, 'preview', hints);
+      handleResult(result);
+      codeReader.reset();
+    }catch(e){
+      console.warn('Sem leitura, tente aproximar/iluminar.');
+    }
+  }
+
+  function handleResult(result){
+    if (!result) return;
+    const now = new Date();
+    const row = {
+      ts: now.toLocaleString(),
+      format: result.getBarcodeFormat ? String(result.getBarcodeFormat()) : (result.format || 'DESCONHECIDO'),
+      text: result.getText ? result.getText() : (result.text || ''),
+      device: deviceLabel
+    };
+    // evitar duplicatas consecutivas em contínuo
+    const lastText = tbody.querySelector('tr td:nth-child(3)')?.textContent || '';
+    if (continuous && row.text && row.text === lastText){ return; }
+    addRow(row);
+    // feedback
+    try { navigator.vibrate && navigator.vibrate(50); } catch{}
+    try { new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAAAAACAgICAgA==').play(); } catch{}
+  }
+
+  async function loop(){
+    if (!continuous) return;
+    try{
+      const result = await codeReader.decodeOnceFromVideoDevice(currentDeviceId, 'preview');
+      handleResult(result);
+    }catch(e){
+      // ignore; tenta de novo
+    }finally{
+      if (continuous) requestAnimationFrame(loop);
+    }
+  }
+
+  deviceSelect.addEventListener('change', async () => {
+    currentDeviceId = deviceSelect.value;
+    if (stream){ await stop(); await start(); }
+  });
+
+  btnStart.addEventListener('click', start);
+  btnStop.addEventListener('click', stop);
+  btnScanOnce.addEventListener('click', scanOnce);
+
+  btnToggle.addEventListener('click', () => {
+    if (!stream){ return alert('Inicie a câmera primeiro.'); }
+    continuous = !continuous;
+    btnToggle.textContent = 'Contínuo: ' + (continuous ? 'ON' : 'OFF');
+    if (continuous){ loop(); }
+  });
+
+  btnTorch.addEventListener('click', async () => {
+    if (!stream || !imageCapture) return;
+    try{
+      const track = stream.getVideoTracks()[0];
+      const cap = track.getCapabilities?.() || {};
+      if (!('torch' in cap)) return alert('Lanterna não suportada neste dispositivo.');
+      torchOn = !torchOn;
+      await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+    }catch(e){
+      alert('Não foi possível alternar a lanterna neste dispositivo.');
+    }
+  });
+
   btnExportCSV.addEventListener('click', () => {
-    const rows = [['Tombamento','Descrição','Local','Carga']];
+    const rows = [['Data/Hora','Tipo','Conteúdo','Dispositivo']];
     tbody.querySelectorAll('tr').forEach(tr => {
-      try{
-        const extra = JSON.parse(tr.dataset.extra||'{}');
-        rows.push([extra.tombamento||'', extra.descricao||'', extra.local||'', extra.carga||'']);
-      }catch(e){ rows.push(['','','','']); }
+      rows.push([
+        tr.children[0].textContent,
+        tr.children[1].textContent,
+        tr.children[2].textContent,
+        tr.children[3].textContent
+      ]);
     });
-    const csv = rows.map(r => r.map(x => `"${(x||'').replace(/"/g,'""')}"`).join(',')).join('
-');
+    const csv = rows.map(r => r.map(x => `"${(x||'').replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'patrimonio.csv';
+    a.download = 'leituras.csv';
     a.click();
   });
 
   btnExportXLSX.addEventListener('click', () => {
     const data = [];
     tbody.querySelectorAll('tr').forEach(tr => {
-      try{
-        const extra = JSON.parse(tr.dataset.extra||'{}');
-        data.push({
-          'Tombamento': extra.tombamento||'',
-          'Descrição': extra.descricao||'',
-          'Local': extra.local||'',
-          'Carga': extra.carga||''
-        });
-      }catch(e){ data.push({'Tombamento':'','Descrição':'','Local':'','Carga':''}); }
+      data.push({
+        'Data/Hora': tr.children[0].textContent,
+        'Tipo': tr.children[1].textContent,
+        'Conteúdo': tr.children[2].textContent,
+        'Dispositivo': tr.children[3].textContent,
+      });
     });
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(data);
-    XLSX.utils.book_append_sheet(wb, ws, 'Patrimonio');
-    XLSX.writeFile(wb, 'patrimonio.xlsx');
+    XLSX.utils.book_append_sheet(wb, ws, 'Leituras');
+    XLSX.writeFile(wb, 'leituras.xlsx');
   });
 
   btnClear.addEventListener('click', () => {
